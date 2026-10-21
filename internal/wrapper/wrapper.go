@@ -156,7 +156,7 @@ func Run(ctx context.Context, cfg Config) (exitCode int, err error) {
 		Started: started,
 		Title:   cfg.Name,
 		Command: strings.Join(cfg.Command, " "),
-		Env:     map[string]string{"TERM": os.Getenv("TERM"), "SHELL": os.Getenv("SHELL")},
+		Env:     map[string]string{"TERM": browserTERM, "SHELL": os.Getenv("SHELL")},
 	})
 	if err != nil {
 		local.restore()

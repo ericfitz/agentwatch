@@ -185,25 +185,28 @@ var scrubbedEnv = map[string]bool{
 	"AGENTWATCH_INBOX":         true,
 }
 
+// The PTY is a new terminal whose viewer is xterm.js. TERM and COLORTERM
+// describe that viewer, not the terminal that launched the wrapper.
+const (
+	browserTERM      = "xterm-256color"
+	browserCOLORTERM = "truecolor"
+)
+
 // childEnv removes both role tokens, so a wrapped agent cannot read a
 // credential that drives other hosts' agents through the relay.
 func childEnv(base []string, id wire.SessionID, inboxDir string) []string {
-	env := make([]string, 0, len(base)+3)
-	hasTerm := false
+	env := make([]string, 0, len(base)+4)
 	for _, kv := range base {
 		k, _, _ := strings.Cut(kv, "=")
-		if scrubbedEnv[k] {
+		if scrubbedEnv[k] || k == "TERM" || k == "COLORTERM" {
 			continue
 		}
-		hasTerm = hasTerm || k == "TERM"
 		env = append(env, kv)
 	}
 	env = append(env, "AGENTWATCH_SESSION="+string(id))
 	if inboxDir != "" {
 		env = append(env, "AGENTWATCH_INBOX="+inboxDir)
 	}
-	if !hasTerm {
-		env = append(env, "TERM=xterm-256color")
-	}
+	env = append(env, "TERM="+browserTERM, "COLORTERM="+browserCOLORTERM)
 	return env
 }

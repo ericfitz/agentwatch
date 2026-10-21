@@ -177,6 +177,11 @@
       ended: false, // the relay closed the session for good
       transfers: new Map(), // id -> upload, see addUpload
       cleanup: [],
+      // The attach snapshot replays queries the app already sent. xterm answers
+      // them, and that answer is a keystroke. Hold input until the snapshot is parsed.
+      suppressInput: true,
+      sawPresence: false,
+      parsingSnapshot: false,
     };
     session = s;
     for (const sub of [
@@ -246,6 +251,9 @@
     ws.onopen = () => {
       if (s.ws !== ws) return;
       opened = true;
+      s.suppressInput = true;
+      s.sawPresence = false;
+      s.parsingSnapshot = false;
       s.term.reset(); // the snapshot (size, replay, exit) repaints the screen
       sendSize(s);
     };
@@ -311,7 +319,15 @@
 
   const frameHandlers = {
     Output(s, bytes) {
-      s.term.write(bytes);
+      if (s.sawPresence) {
+        s.term.write(bytes);
+        return;
+      }
+      s.parsingSnapshot = true;
+      s.term.write(bytes, () => {
+        s.parsingSnapshot = false;
+        if (s.sawPresence) s.suppressInput = false;
+      });
     },
     SizeChanged(s, size) {
       s.term.resize(size.cols, size.rows);
@@ -326,6 +342,8 @@
       onTransferStatus(s, st);
     },
     Presence(s, p) {
+      s.sawPresence = true;
+      if (!s.parsingSnapshot) s.suppressInput = false;
       const wasReady = ready(s);
       s.attached = s.everAttached = true;
       s.redials = 0;
@@ -354,7 +372,7 @@
   }
 
   function sendInput(s, bytes) {
-    if (s.exit || s.ended) return;
+    if (s.suppressInput || s.exit || s.ended) return;
     for (let i = 0; i < bytes.length; i += AW.maxInput) {
       send(s, "Input", bytes.subarray(i, i + AW.maxInput));
     }

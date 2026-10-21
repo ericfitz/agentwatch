@@ -200,7 +200,7 @@ Your terminal behaves as if you ran `claude` directly. When the session starts, 
 
 The default announce text types the saved path followed by a space at the agent's prompt, without pressing Enter. To have a shell run a command on each upload instead, end the template with `\r`, as in `--announce 'echo got {name}\r'`.
 
-The child sees `AGENTWATCH_SESSION` (its session ID) and, unless you pass `--no-inbox`, `AGENTWATCH_INBOX` (the absolute inbox path). If `TERM` is unset, the child gets `TERM=xterm-256color`.
+The child sees `AGENTWATCH_SESSION` (its session ID) and, unless you pass `--no-inbox`, `AGENTWATCH_INBOX` (the absolute inbox path). The PTY is viewed in the browser, so the child always gets `TERM=xterm-256color` and `COLORTERM=truecolor`. A `NO_COLOR` value on the wrapper is passed through, and programs that honor it draw without color.
 
 If stdin is not a terminal, the wrapper does not read it, and the PTY starts at 80x24 until a browser asks for another size.
 
