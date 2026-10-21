@@ -23,7 +23,6 @@
   function show(name) {
     for (const v of ["login", "list", "session"]) $(v).hidden = v !== name;
     $("signout").hidden = name === "login";
-    $("upload").hidden = name !== "session";
     $("status").hidden = name !== "session";
     if (name !== "session") $("title").textContent = "";
   }
@@ -175,7 +174,6 @@
       viewers: 0,
       exit: null, // the Exit frame once the process has ended
       ended: false, // the relay closed the session for good
-      transfers: new Map(), // id -> upload, see addUpload
       cleanup: [],
       // The attach snapshot replays queries the app already sent. xterm answers
       // them, and that answer is a keystroke. Hold input until the snapshot is parsed.
@@ -206,10 +204,6 @@
     session = null;
     clearTimeout(s.timer);
     for (const off of s.cleanup) off();
-    for (const t of s.transfers.values()) {
-      if (t.offered) send(s, "Cancel", { id: t.id });
-    }
-    $("transfers").replaceChildren();
     if (s.ws) {
       const ws = s.ws;
       s.ws = null;
@@ -284,11 +278,11 @@
   function onClose(s, code, opened) {
     if (session !== s) return;
     if (code === AW.close.Ended) {
-      endSession(s, "The session ended before the upload finished.");
+      endSession(s);
       return;
     }
     if (code === AW.close.Protocol) {
-      endSession(s, "The relay closed the connection with a protocol error.");
+      endSession(s);
       toast("The relay closed the connection with a protocol error.", "error");
       return;
     }
@@ -311,10 +305,9 @@
     s.timer = setTimeout(() => connect(s), delay);
   }
 
-  function endSession(s, message) {
+  function endSession(s) {
     s.ended = true;
     s.term.options.disableStdin = true;
-    failTransfers(s, message);
   }
 
   const frameHandlers = {
@@ -335,35 +328,20 @@
     Exit(s, exit) {
       s.exit = exit;
       s.term.options.disableStdin = true;
-      failTransfers(s, "The process exited before the upload finished.");
       renderStatus(s);
-    },
-    TransferStatus(s, st) {
-      onTransferStatus(s, st);
     },
     Presence(s, p) {
       s.sawPresence = true;
       if (!s.parsingSnapshot) s.suppressInput = false;
-      const wasReady = ready(s);
       s.attached = s.everAttached = true;
       s.redials = 0;
       s.dropped = false;
       s.notFoundSince = 0;
       s.wrapperOnline = p.wrapperOnline;
       s.viewers = p.viewers;
-      if (!wasReady && ready(s)) {
-        for (const t of s.transfers.values()) {
-          if (t.offer) offer(s, t);
-        }
-      }
       renderStatus(s);
     },
   };
-
-  // ready means frames sent now reach the wrapper.
-  function ready(s) {
-    return s.attached && s.wrapperOnline && !s.exit && !s.ended && s.ws !== null && s.ws.readyState === WebSocket.OPEN;
-  }
 
   function send(s, kind, value) {
     if (!s.ws || s.ws.readyState !== WebSocket.OPEN) return false;
@@ -407,143 +385,6 @@
     $("status").dataset.tone = tone;
   }
 
-  // Uploads. Each upload is
-  //   {id, name, data, offer, offered, awaitingCancel, sent, acked, row}
-  // sent and acked are byte counts. acked comes from receiving statuses and
-  // is the flow-control credit.
-
-  async function addUpload(s, file) {
-    const inbox = s.info && s.info.inbox;
-    if (inbox && !inbox.enabled) {
-      toast(AW.failText.disabled, "error");
-      return;
-    }
-    if (inbox && file.size > inbox.maxBytes) {
-      toast(`${file.name}: ${AW.failText.too_large}`, "error");
-      return;
-    }
-    if (s.exit || s.ended) {
-      toast("The session has ended.", "error");
-      return;
-    }
-    const t = {
-      id: hex(crypto.getRandomValues(new Uint8Array(AW.chunkIdBytes))),
-      name: file.name,
-      data: null,
-      offer: null,
-      offered: false,
-      awaitingCancel: false,
-      sent: 0,
-      acked: 0,
-      row: null,
-    };
-    t.row = transferRow(s, t);
-    s.transfers.set(t.id, t);
-    setProgress(t, "hashing");
-    try {
-      // WebCrypto has no streaming digest, so the whole file is read first.
-      const data = new Uint8Array(await file.arrayBuffer());
-      const sha256 = hex(new Uint8Array(await crypto.subtle.digest("SHA-256", data)));
-      t.data = data;
-      t.offer = { id: t.id, name: file.name, size: data.length, sha256 };
-    } catch (err) {
-      finishTransfer(s, t, `${file.name}: could not read the file: ${err.message}`, "error");
-      return;
-    }
-    if (s.transfers.get(t.id) !== t) return;
-    if (ready(s)) {
-      offer(s, t);
-    } else {
-      setProgress(t, "waiting for the agent host");
-    }
-  }
-
-  // offer starts t from byte 0. After a drop the wrapper may still hold the
-  // earlier attempt, so a repeat offer cancels it first and ignores statuses
-  // until that cancel is answered. If the repeat offer comes back done, the
-  // file was saved before the drop and is not sent again.
-  function offer(s, t) {
-    t.sent = 0;
-    t.acked = 0;
-    t.awaitingCancel = t.offered;
-    if (t.offered) send(s, "Cancel", { id: t.id });
-    send(s, "Offer", t.offer);
-    t.offered = true;
-    setProgress(t, "offered");
-  }
-
-  function onTransferStatus(s, st) {
-    const t = s.transfers.get(st.id);
-    if (!t || !t.offer) return;
-    if (t.awaitingCancel) {
-      if (st.state === "failed" && st.reason === "cancelled") t.awaitingCancel = false;
-      return;
-    }
-    if (st.state === "receiving") {
-      t.acked = st.received;
-      setProgress(t);
-      pump(s, t);
-    } else if (st.state === "done") {
-      finishTransfer(s, t, `Saved ${st.name} to ${st.path}`, "ok");
-    } else {
-      finishTransfer(s, t, `${t.name}: ${AW.failText[st.reason] || st.reason}`, "error");
-    }
-  }
-
-  function pump(s, t) {
-    const windowBytes = AW.maxChunk * AW.uploadWindow;
-    while (ready(s) && t.sent < t.data.length && t.sent - t.acked < windowBytes) {
-      const end = Math.min(t.sent + AW.maxChunk, t.data.length);
-      send(s, "Chunk", { id: t.id, offset: t.sent, data: t.data.subarray(t.sent, end) });
-      t.sent = end;
-    }
-  }
-
-  function cancelTransfer(s, t) {
-    if (t.offered) send(s, "Cancel", { id: t.id });
-    finishTransfer(s, t, `${AW.failText.cancelled}: ${t.name}`, "");
-  }
-
-  function finishTransfer(s, t, message, tone) {
-    s.transfers.delete(t.id);
-    t.row.remove();
-    toast(message, tone);
-  }
-
-  function failTransfers(s, message) {
-    for (const t of [...s.transfers.values()]) finishTransfer(s, t, `${t.name}: ${message}`, "error");
-  }
-
-  function transferRow(s, t) {
-    const li = document.createElement("li");
-    const label = document.createElement("span");
-    label.className = "name";
-    const bar = document.createElement("progress");
-    bar.max = 1;
-    bar.value = 0;
-    const cancel = document.createElement("button");
-    cancel.type = "button";
-    cancel.className = "link";
-    cancel.textContent = "Cancel";
-    cancel.addEventListener("click", () => cancelTransfer(s, t));
-    li.append(label, bar, cancel);
-    $("transfers").append(li);
-    return li;
-  }
-
-  function setProgress(t, phase) {
-    const label = t.row.querySelector(".name");
-    const bar = t.row.querySelector("progress");
-    if (phase) {
-      label.textContent = `${t.name} (${phase})`;
-      return;
-    }
-    bar.value = t.offer.size > 0 ? t.acked / t.offer.size : 0;
-    label.textContent = `${t.name} (${Math.floor(100 * bar.value)}%)`;
-  }
-
-  const hex = (bytes) => Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
-
   function toast(message, tone) {
     const el = document.createElement("div");
     el.className = `toast ${tone || ""}`;
@@ -552,35 +393,8 @@
     setTimeout(() => el.remove(), TOAST_MS);
   }
 
-  const hasFiles = (e) => e.dataTransfer && [...e.dataTransfer.types].includes("Files");
-
-  function uploadAll(files) {
-    for (const f of files) {
-      if (session) addUpload(session, f);
-    }
-  }
-
   $("login").addEventListener("submit", signIn);
   $("signout").addEventListener("click", () => signOut());
-  $("upload").addEventListener("click", () => $("file").click());
-  $("file").addEventListener("change", (e) => {
-    uploadAll(e.target.files);
-    e.target.value = "";
-  });
-  $("session").addEventListener("dragover", (e) => {
-    if (session && hasFiles(e)) {
-      e.preventDefault();
-      $("dropzone").hidden = false;
-    }
-  });
-  $("session").addEventListener("dragleave", (e) => {
-    if (!$("session").contains(e.relatedTarget)) $("dropzone").hidden = true;
-  });
-  $("session").addEventListener("drop", (e) => {
-    e.preventDefault();
-    $("dropzone").hidden = true;
-    uploadAll(e.dataTransfer.files);
-  });
   window.addEventListener("hashchange", route);
   route();
 })();

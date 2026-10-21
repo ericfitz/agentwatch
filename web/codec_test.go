@@ -1,7 +1,6 @@
 package web_test
 
 import (
-	"crypto/sha256"
 	"encoding/json"
 	"os"
 	"reflect"
@@ -12,12 +11,6 @@ import (
 	"github.com/dop251/goja"
 
 	"github.com/ericfitz/agentwatch/internal/wire"
-)
-
-const (
-	idHex = "000102030405060708090a0b0c0d0e0f"
-	// SHA-256("abc"), the FIPS 180-2 test vector.
-	abcSHA = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
 )
 
 // harness is test-only JS. view renders what AW.decode hands app.js as JSON,
@@ -126,16 +119,11 @@ func call(t *testing.T, vm *goja.Runtime, fn string, frame []byte) (goja.Value, 
 }
 
 func TestCodecRoundTripsEveryKind(t *testing.T) {
-	var id wire.TransferID
-	for i := range id {
-		id[i] = byte(i)
-	}
-	digest := wire.Digest(sha256.Sum256([]byte("abc")))
 	var secret wire.SessionSecret
 	for i := range secret {
 		secret[i] = 0xff
 	}
-	fill := strings.NewReplacer("$ID", idHex, "$SHA", abcSHA, "$SECRET", strings.Repeat("_", 42)+"8").Replace
+	fill := strings.NewReplacer("$SECRET", strings.Repeat("_", 42)+"8").Replace
 
 	cases := []struct {
 		msg  wire.Message
@@ -148,28 +136,14 @@ func TestCodecRoundTripsEveryKind(t *testing.T) {
 				Host:    "devbox",
 				Command: []string{"claude", "--resume"},
 				Started: time.Date(2026, 10, 21, 5, 3, 0, 0, time.UTC),
-				Inbox:   wire.InboxInfo{Enabled: true, MaxBytes: 100 << 20},
 			},
-			`{"kind":"Hello","value":{"secret":"$SECRET","name":"api-agent","host":"devbox","command":["claude","--resume"],"started":"2026-10-21T05:03:00Z","inbox":{"enabled":true,"maxBytes":104857600}}}`,
+			`{"kind":"Hello","value":{"secret":"$SECRET","name":"api-agent","host":"devbox","command":["claude","--resume"],"started":"2026-10-21T05:03:00Z"}}`,
 		},
 		{wire.Output("\x1b[31m\xff\x00\xe2\x82"), `{"kind":"Output","value":"1b5b33316dff00e282"}`},
 		{wire.SizeChanged{TermSize: wire.TermSize{Cols: 100, Rows: 30}}, `{"kind":"SizeChanged","value":{"cols":100,"rows":30}}`},
 		{wire.Exit{Code: 137, Signal: "SIGKILL"}, `{"kind":"Exit","value":{"code":137,"signal":"SIGKILL"}}`},
-		{
-			wire.TransferStatus{ID: id, State: wire.TransferDone, Name: "a.txt", Size: 3, Received: 3, SHA256: &digest, Path: "/inbox/a.txt"},
-			`{"kind":"TransferStatus","value":{"id":"$ID","state":"done","name":"a.txt","size":3,"received":3,"sha256":"$SHA","path":"/inbox/a.txt"}}`,
-		},
 		{wire.Input("ls -la\r"), `{"kind":"Input","value":"6c73202d6c610d"}`},
 		{wire.ResizeRequest{TermSize: wire.TermSize{Cols: 1000, Rows: 1}}, `{"kind":"ResizeRequest","value":{"cols":1000,"rows":1}}`},
-		{
-			wire.Offer{ID: id, Name: "naïve <€> 😀.txt", Size: 3, SHA256: digest},
-			`{"kind":"Offer","value":{"id":"$ID","name":"naïve <€> 😀.txt","size":3,"sha256":"$SHA"}}`,
-		},
-		{
-			wire.Chunk{ID: id, Offset: 5<<32 + 7, Data: []byte("abc")},
-			`{"kind":"Chunk","value":{"id":"$ID","offset":21474836487,"data":"616263"}}`,
-		},
-		{wire.Cancel{ID: id}, `{"kind":"Cancel","value":{"id":"$ID"}}`},
 		{wire.Presence{WrapperOnline: false, Viewers: 2}, `{"kind":"Presence","value":{"wrapperOnline":false,"viewers":2}}`},
 	}
 
@@ -224,21 +198,16 @@ func TestCodecRoundTripsEveryKind(t *testing.T) {
 func TestCodecRejectsMalformedFrames(t *testing.T) {
 	vm := newCodec(t)
 	for name, frame := range map[string][]byte{
-		"empty frame":        {},
-		"unknown kind":       {0x7f},
-		"short Chunk header": append([]byte{byte(wire.KindChunk)}, make([]byte, 23)...),
-		"offset past 2^53":   append([]byte{byte(wire.KindChunk)}, append(make([]byte, 16), 0x00, 0x20, 0, 0, 0, 0, 0, 0, 'x')...),
+		"empty frame":  {},
+		"unknown kind": {0x7f},
+		"kind 0x05":    {0x05},
 	} {
 		if _, err := call(t, vm, "view", frame); err == nil {
 			t.Errorf("AW.decode accepted %s", name)
 		}
 	}
 	for name, js := range map[string]string{
-		"unknown kind":      `AW.encode("Nope", {})`,
-		"short Chunk id":    `AW.encode("Chunk", {id: "0102", offset: 0, data: new Uint8Array(1)})`,
-		"uppercase id":      `AW.encode("Chunk", {id: "` + strings.ToUpper(idHex) + `", offset: 0, data: new Uint8Array(1)})`,
-		"fractional offset": `AW.encode("Chunk", {id: "` + idHex + `", offset: 1.5, data: new Uint8Array(1)})`,
-		"negative offset":   `AW.encode("Chunk", {id: "` + idHex + `", offset: -1, data: new Uint8Array(1)})`,
+		"unknown kind": `AW.encode("Nope", {})`,
 	} {
 		if _, err := vm.RunString(js); err == nil {
 			t.Errorf("AW.encode accepted %s", name)

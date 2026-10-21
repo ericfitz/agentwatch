@@ -107,9 +107,9 @@ func deliver[T any](out chan<- T, v T, quit <-chan struct{}) bool {
 	}
 }
 
-// ptyWriter serializes keyboard input, viewer input, and announcements onto the
-// PTY. enqueue never blocks: a blocked PTY write must not stall the loop that
-// drains PTY output, or a child that stops reading stdin deadlocks the session.
+// ptyWriter serializes keyboard input and viewer input onto the PTY. enqueue
+// never blocks: a blocked PTY write must not stall the loop that drains PTY
+// output, or a child that stops reading stdin deadlocks the session.
 type ptyWriter struct {
 	mu     sync.Mutex
 	ready  sync.Cond
@@ -182,7 +182,6 @@ var scrubbedEnv = map[string]bool{
 	"AGENTWATCH_WRAPPER_TOKEN": true,
 	"AGENTWATCH_VIEWER_TOKEN":  true,
 	"AGENTWATCH_SESSION":       true,
-	"AGENTWATCH_INBOX":         true,
 }
 
 // The PTY is a new terminal whose viewer is xterm.js. TERM and COLORTERM
@@ -194,8 +193,8 @@ const (
 
 // childEnv removes both role tokens, so a wrapped agent cannot read a
 // credential that drives other hosts' agents through the relay.
-func childEnv(base []string, id wire.SessionID, inboxDir string) []string {
-	env := make([]string, 0, len(base)+4)
+func childEnv(base []string, id wire.SessionID) []string {
+	env := make([]string, 0, len(base)+3)
 	for _, kv := range base {
 		k, _, _ := strings.Cut(kv, "=")
 		if scrubbedEnv[k] || k == "TERM" || k == "COLORTERM" {
@@ -204,9 +203,6 @@ func childEnv(base []string, id wire.SessionID, inboxDir string) []string {
 		env = append(env, kv)
 	}
 	env = append(env, "AGENTWATCH_SESSION="+string(id))
-	if inboxDir != "" {
-		env = append(env, "AGENTWATCH_INBOX="+inboxDir)
-	}
 	env = append(env, "TERM="+browserTERM, "COLORTERM="+browserCOLORTERM)
 	return env
 }

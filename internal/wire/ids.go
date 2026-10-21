@@ -6,7 +6,6 @@ import (
 	"crypto/subtle"
 	"encoding/base32"
 	"encoding/base64"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"strings"
@@ -91,30 +90,6 @@ func ParseSessionID(s string) (SessionID, error) {
 		return "", fmt.Errorf("session id %q is not %d lowercase base32 characters", s, sessionIDLen)
 	}
 	return SessionID(s), nil
-}
-
-type TransferID [16]byte // 32 lowercase hex chars in JSON, raw 16 bytes inside Chunk
-type Digest [32]byte     // 64 lowercase hex chars in JSON
-
-func (id TransferID) String() string                { return hex.EncodeToString(id[:]) } // also names the .part file
-func (id TransferID) MarshalText() ([]byte, error)  { return []byte(id.String()), nil }
-func (id *TransferID) UnmarshalText(b []byte) error { return parseLowerHex(id[:], b) }
-
-func (d Digest) String() string                { return hex.EncodeToString(d[:]) }
-func (d Digest) MarshalText() ([]byte, error)  { return []byte(d.String()), nil }
-func (d *Digest) UnmarshalText(b []byte) error { return parseLowerHex(d[:], b) }
-
-func parseLowerHex(dst, src []byte) error {
-	if len(src) != hex.EncodedLen(len(dst)) {
-		return fmt.Errorf("want %d hex characters, got %d", hex.EncodedLen(len(dst)), len(src))
-	}
-	for _, c := range src {
-		if !('0' <= c && c <= '9' || 'a' <= c && c <= 'f') {
-			return fmt.Errorf("%q is not lowercase hex", src)
-		}
-	}
-	_, err := hex.Decode(dst, src)
-	return err
 }
 
 func random(n int) []byte {

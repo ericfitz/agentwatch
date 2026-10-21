@@ -3,7 +3,6 @@ package wire_test
 import (
 	"crypto/sha256"
 	"encoding/base32"
-	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -18,11 +17,6 @@ import (
 	"github.com/ericfitz/agentwatch/internal/wire"
 )
 
-var (
-	sampleID     = wire.TransferID{0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f}
-	sampleDigest = wire.Digest(sha256.Sum256([]byte("abc")))
-)
-
 func samples() []wire.Message {
 	return []wire.Message{
 		wire.Hello{
@@ -31,17 +25,12 @@ func samples() []wire.Message {
 			Host:    "devbox",
 			Command: []string{"claude", "--resume"},
 			Started: time.Date(2026, 10, 21, 5, 3, 0, 0, time.UTC),
-			Inbox:   wire.InboxInfo{Enabled: true, MaxBytes: 100 << 20},
 		},
 		wire.Output("\x1b[31m\xff\x00\xe2\x82"),
 		wire.SizeChanged{TermSize: wire.TermSize{Cols: 100, Rows: 30}},
 		wire.Exit{Code: 137, Signal: "SIGKILL"},
-		wire.TransferStatus{ID: sampleID, State: wire.TransferDone, Name: "a.txt", Size: 3, Received: 3, SHA256: &sampleDigest, Path: "/inbox/a.txt"},
 		wire.Input("ls -la\r"),
 		wire.ResizeRequest{TermSize: wire.TermSize{Cols: 1000, Rows: 1}},
-		wire.Offer{ID: sampleID, Name: "naïve <€> 😀.txt", Size: 3, SHA256: sampleDigest},
-		wire.Chunk{ID: sampleID, Offset: 5<<32 + 7, Data: []byte("abc")},
-		wire.Cancel{ID: sampleID},
 		wire.Presence{WrapperOnline: true, Viewers: 2},
 	}
 }
@@ -78,17 +67,8 @@ func TestEveryKindRoundTrips(t *testing.T) {
 	}
 }
 
-func TestChunkWireLayout(t *testing.T) {
-	frame := wire.Encode(wire.Chunk{ID: sampleID, Offset: 5<<32 + 7, Data: []byte("abc")})
-	want, _ := hex.DecodeString("13" + "000102030405060708090a0b0c0d0e0f" + "0000000500000007" + "616263")
-	if !reflect.DeepEqual(frame, want) {
-		t.Fatalf("Chunk frame\n got %x\nwant %x", frame, want)
-	}
-}
-
 func TestDecodeAcceptsLimits(t *testing.T) {
 	for name, m := range map[string]wire.Message{
-		"Chunk of MaxChunk bytes": wire.Chunk{ID: sampleID, Data: make([]byte, wire.MaxChunk)},
 		"Input of MaxInput bytes": wire.Input(make([]byte, wire.MaxInput)),
 		"TermSize 1x1":            wire.ResizeRequest{TermSize: wire.TermSize{Cols: 1, Rows: 1}},
 		"TermSize 1000x1000":      wire.SizeChanged{TermSize: wire.TermSize{Cols: 1000, Rows: 1000}},
@@ -121,28 +101,12 @@ func helloFrame(name string, args int) []byte {
 		"host":    "h",
 		"command": make([]string, args),
 		"started": "2026-10-21T05:03:00Z",
-		"inbox":   map[string]any{"enabled": false, "maxBytes": 0},
 	})
 }
 
-func offerFrame(id, digest string) []byte {
-	return jsonFrame(wire.KindOffer, map[string]any{"id": id, "name": "a.txt", "size": 3, "sha256": digest})
-}
-
-func chunkFrame(offset uint64, data int) []byte {
-	b := frame(wire.KindChunk, string(sampleID[:]))
-	b = binary.BigEndian.AppendUint64(b, offset)
-	return append(b, make([]byte, data)...)
-}
-
 func TestDecodeRejects(t *testing.T) {
-	goodID := sampleID.String()
-	goodDigest := sampleDigest.String()
 	for name, msg := range map[string][]byte{
-		"valid Hello":  helloFrame("api-agent", 64),
-		"valid Offer":  offerFrame(goodID, goodDigest),
-		"valid Chunk":  chunkFrame(0, 1),
-		"valid Cancel": frame(wire.KindCancel, `{"id":"`+goodID+`"}`),
+		"valid Hello": helloFrame("api-agent", 64),
 	} {
 		if _, err := wire.Decode(msg); err != nil {
 			t.Fatalf("control case %s must decode: %v", name, err)
@@ -152,25 +116,15 @@ func TestDecodeRejects(t *testing.T) {
 	cases := map[string][]byte{
 		"empty frame":                   nil,
 		"unknown kind":                  {0x7f},
-		"short Chunk header":            frame(wire.KindChunk, string(make([]byte, 23))),
-		"Chunk without data":            chunkFrame(0, 0),
-		"Chunk data over MaxChunk":      chunkFrame(0, wire.MaxChunk+1),
-		"Chunk offset past int64":       chunkFrame(1<<63, 1),
+		"kind 0x05":                     {0x05},
 		"TermSize of 0":                 frame(wire.KindResizeRequest, `{"cols":0,"rows":24}`),
 		"TermSize of 1001":              frame(wire.KindSizeChanged, `{"cols":80,"rows":1001}`),
-		"malformed transfer id":         frame(wire.KindCancel, `{"id":"xyz"}`),
-		"uppercase transfer id":         frame(wire.KindCancel, `{"id":"`+strings.ToUpper(goodID)+`"}`),
-		"transfer id as number":         frame(wire.KindCancel, `{"id":7}`),
-		"short digest":                  offerFrame(goodID, goodDigest[:63]),
-		"non-hex digest":                offerFrame(goodID, "z"+goodDigest[1:]),
-		"negative Offer size":           frame(wire.KindOffer, `{"id":"`+goodID+`","name":"a","size":-1,"sha256":"`+goodDigest+`"}`),
-		"Offer name over 255 bytes":     jsonFrame(wire.KindOffer, map[string]any{"id": goodID, "name": strings.Repeat("a", 256), "size": 1, "sha256": goodDigest}),
 		"empty Hello name":              helloFrame("", 1),
 		"Hello name over 128 bytes":     helloFrame(strings.Repeat("n", 129), 1),
 		"Hello name with escape":        helloFrame("evil\x1b[2J", 1),
 		"Hello name with newline":       helloFrame("two\nlines", 1),
 		"Hello with 65 command args":    helloFrame("api-agent", 65),
-		"Hello secret wrong length":     frame(wire.KindHello, `{"secret":"AAAA","name":"x","host":"h","command":[],"started":"2026-10-21T05:03:00Z","inbox":{}}`),
+		"Hello secret wrong length":     frame(wire.KindHello, `{"secret":"AAAA","name":"x","host":"h","command":[],"started":"2026-10-21T05:03:00Z"}`),
 		"Input over MaxInput":           frame(wire.KindInput, strings.Repeat("a", wire.MaxInput+1)),
 		"JSON kind with non-JSON":       frame(wire.KindExit, "nope"),
 		"JSON kind with trailing bytes": frame(wire.KindPresence, `{"viewers":1} {}`),
@@ -189,12 +143,8 @@ func TestPeekKindRoutesMatchTable(t *testing.T) {
 		0x02: wire.RouteUp,
 		0x03: wire.RouteUp,
 		0x04: wire.RouteUp,
-		0x05: wire.RouteUp,
 		0x10: wire.RouteDown,
 		0x11: wire.RouteDown,
-		0x12: wire.RouteDown,
-		0x13: wire.RouteDown,
-		0x14: wire.RouteDown,
 		0x20: wire.RouteRelay,
 	}
 	if got := tableKinds(); !reflect.DeepEqual(got, want) {
@@ -227,21 +177,15 @@ func TestClientJSNamesEveryKindAndCloseCode(t *testing.T) {
 		Kind         map[string]int
 		Payload      map[string]string
 		Close        map[string]int
-		MaxChunk     int
 		MaxInput     int
-		UploadWindow int
-		ChunkHeader  int
-		ChunkIDBytes int
-		FailText     map[string]string
 	}
 	if err := json.Unmarshal([]byte(v.String()), &aw); err != nil {
 		t.Fatal(err)
 	}
 
 	wantKind := map[string]int{
-		"Hello": 0x01, "Output": 0x02, "SizeChanged": 0x03, "Exit": 0x04, "TransferStatus": 0x05,
-		"Input": 0x10, "ResizeRequest": 0x11, "Offer": 0x12, "Chunk": 0x13, "Cancel": 0x14,
-		"Presence": 0x20,
+		"Hello": 0x01, "Output": 0x02, "SizeChanged": 0x03, "Exit": 0x04,
+		"Input": 0x10, "ResizeRequest": 0x11, "Presence": 0x20,
 	}
 	if !reflect.DeepEqual(aw.Kind, wantKind) {
 		t.Errorf("AW.kind = %v, want %v", aw.Kind, wantKind)
@@ -250,7 +194,7 @@ func TestClientJSNamesEveryKindAndCloseCode(t *testing.T) {
 	for name := range wantKind {
 		wantPayload[name] = "json"
 	}
-	wantPayload["Output"], wantPayload["Input"], wantPayload["Chunk"] = "raw", "raw", "chunk"
+	wantPayload["Output"], wantPayload["Input"] = "raw", "raw"
 	if !reflect.DeepEqual(aw.Payload, wantPayload) {
 		t.Errorf("AW.payload = %v, want %v", aw.Payload, wantPayload)
 	}
@@ -258,19 +202,11 @@ func TestClientJSNamesEveryKindAndCloseCode(t *testing.T) {
 	if !reflect.DeepEqual(aw.Close, wantClose) {
 		t.Errorf("AW.close = %v, want %v", aw.Close, wantClose)
 	}
-	for _, reason := range []string{"disabled", "too_large", "busy", "protocol", "hash_mismatch", "cancelled", "timeout", "io_error"} {
-		if aw.FailText[reason] == "" {
-			t.Errorf("AW.failText has no text for %q", reason)
-		}
-	}
-	if len(aw.FailText) != 8 {
-		t.Errorf("AW.failText has %d reasons, want 8", len(aw.FailText))
-	}
 	if aw.Subprotocol != "agentwatch.v1" || aw.BearerPrefix != "agentwatch.bearer." {
 		t.Errorf("AW subprotocol = %q, bearerPrefix = %q", aw.Subprotocol, aw.BearerPrefix)
 	}
-	if aw.ChunkHeader != 24 || aw.ChunkIDBytes != 16 || aw.MaxChunk != 256<<10 || aw.MaxInput != 64<<10 || aw.UploadWindow != 4 {
-		t.Errorf("AW limits: chunkHeader %d, maxChunk %d, maxInput %d, uploadWindow %d", aw.ChunkHeader, aw.MaxChunk, aw.MaxInput, aw.UploadWindow)
+	if aw.MaxInput != 64<<10 {
+		t.Errorf("AW.maxInput = %d, want %d", aw.MaxInput, 64<<10)
 	}
 }
 

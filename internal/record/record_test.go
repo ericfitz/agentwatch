@@ -122,7 +122,7 @@ func TestEvents(t *testing.T) {
 	r.Output(at(250*time.Millisecond), []byte("hi <b>&"))
 	r.Input(at(500*time.Millisecond), []byte("x\r"))
 	r.Resize(at(time.Second), 100, 30)
-	r.Marker(at(1500*time.Millisecond), "received /inbox/a.txt")
+	r.Marker(at(1500*time.Millisecond), "relay connected")
 	if err := r.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -130,7 +130,7 @@ func TestEvents(t *testing.T) {
 		{0.25, "o", "hi <b>&"},
 		{0.5, "i", "x\r"},
 		{1, "r", "100x30"},
-		{1.5, "m", "received /inbox/a.txt"},
+		{1.5, "m", "relay connected"},
 	}
 	if got := events(t, s); !reflect.DeepEqual(got, want) {
 		t.Errorf("events\n got %v\nwant %v", got, want)

@@ -17,7 +17,6 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -133,10 +132,6 @@ func parseRunFlags(args []string) (runOptions, error) {
 	record := fs.String("record", defaultRecordDir(), "asciicast destination `PATH`; a directory gets one new file per session")
 	noRecord := fs.Bool("no-record", false, "turn recording off")
 	recordInput := fs.Bool("record-input", false, "also record keystrokes as \"i\" events; keystrokes can contain secrets")
-	inboxDir := fs.String("inbox", "agentwatch-inbox", "receive `DIR` for uploads, created with mode 0700 on the first upload")
-	noInbox := fs.Bool("no-inbox", false, "refuse uploads")
-	maxFile := fs.String("max-file-size", "100MiB", "largest accepted upload `SIZE`; accepts KiB, MiB, and GiB suffixes")
-	announce := fs.String("announce", wrapper.DefaultAnnounce, "`TEMPLATE` typed into the PTY after a verified upload; placeholders {path} {name} {size} {sha256}, escapes \\r \\n \\t \\\\ \\{")
 	logPath := fs.String("log", "", "diagnostics `PATH` (default stderr when headless, discarded when interactive)")
 	if err := parseFlags(fs, args); err != nil {
 		return runOptions{}, err
@@ -157,17 +152,6 @@ func parseRunFlags(args []string) (runOptions, error) {
 		cfg.Record = *record
 	}
 	var err error
-	if !*noInbox {
-		if cfg.Inbox, err = filepath.Abs(*inboxDir); err != nil {
-			return runOptions{}, err
-		}
-		if cfg.MaxFileBytes, err = parseSize(*maxFile); err != nil {
-			return runOptions{}, fmt.Errorf("--max-file-size: %w", err)
-		}
-	}
-	if cfg.Announce, err = wrapper.ParseAnnounce(*announce); err != nil {
-		return runOptions{}, fmt.Errorf("--announce: %w", err)
-	}
 	if *relayURL != "" {
 		if cfg.Relay, err = relayTarget(*relayURL, *tokenFile, *caFile); err != nil {
 			return runOptions{}, err
@@ -335,18 +319,6 @@ func loadToken(path, env string) (wire.Token, error) {
 		return wire.Token{}, fmt.Errorf("%s: %w", source, err)
 	}
 	return tok, nil
-}
-
-var sizeUnits = map[string]int64{"": 1, "KiB": 1 << 10, "MiB": 1 << 20, "GiB": 1 << 30}
-
-func parseSize(s string) (int64, error) {
-	digits := strings.TrimRight(s, "KMGiB")
-	unit, ok := sizeUnits[s[len(digits):]]
-	n, err := strconv.ParseInt(digits, 10, 64)
-	if !ok || err != nil || n <= 0 || n > (1<<62)/unit {
-		return 0, fmt.Errorf("%q is not a positive size such as 100MiB", s)
-	}
-	return n * unit, nil
 }
 
 // defaultRecordDir ends in a separator, which tells record.Open to make one

@@ -1,6 +1,6 @@
 # agentwatch
 
-agentwatch runs an interactive program, usually a coding agent such as `claude`, inside a pseudo-terminal (PTY) on one host. A person can then watch and drive that program from a browser anywhere. The agent host only dials out. A relay on a public HTTPS address pairs agent hosts with browsers. Every session is recorded as an [asciicast v2](https://docs.asciinema.org/manual/asciicast/v2/) file, and a browser can push a file to the agent host, which checks its SHA-256 digest before telling the agent the file exists.
+agentwatch runs an interactive program, usually a coding agent such as `claude`, inside a pseudo-terminal (PTY) on one host. A person can then watch and drive that program from a browser anywhere. The agent host only dials out. A relay on a public HTTPS address pairs agent hosts with browsers. Every session is recorded as an [asciicast v2](https://docs.asciinema.org/manual/asciicast/v2/) file.
 
 **A viewer token is full control of every wrapped process.** Anyone who holds it can type into every session on the relay. If you wrap `bash`, the viewer token is a shell on that host as your user. Guard the viewer token the way you guard an SSH private key, and never share it with someone you would not give that shell.
 
@@ -13,15 +13,15 @@ agentwatch is one binary with three subcommands.
 ```
 agent host                          relay host                      any browser
 agentwatch run -- claude  --wss-->  agentwatch relay  <--wss--  the embedded page
-  PTY, local terminal,                session list, fan-out,        xterm.js terminal,
-  recording, inbox                    replay, auth                  upload
+  PTY, local terminal,                session list, fan-out,        xterm.js terminal
+  recording                           replay, auth
 ```
 
-- `agentwatch run -- COMMAND` is the wrapper. It starts `COMMAND` in a PTY, keeps your local terminal working as if you ran `COMMAND` directly, writes the recording, receives uploads into an inbox directory, and holds one outbound WebSocket to the relay.
+- `agentwatch run -- COMMAND` is the wrapper. It starts `COMMAND` in a PTY, keeps your local terminal working as if you ran `COMMAND` directly, writes the recording, and holds one outbound WebSocket to the relay.
 - `agentwatch relay` serves the page, lists sessions, and routes frames between one wrapper and any number of browsers per session. It reads the first byte of each frame to route it and decodes no payload except the wrapper's `Hello`.
 - `agentwatch token` prints a new random token.
 
-Go is the language because one static binary carries the wrapper, the relay, and the page. The page is compiled into the binary with `go:embed`, and a build with `CGO_ENABLED=0` links no C library, so a host needs only the one file. `github.com/creack/pty` provides the PTY, and the standard library provides TLS, HTTP routing, SHA-256, and logging. The module targets Go 1.22.2, so the dependencies are pinned to versions that still support it: `github.com/creack/pty` v1.1.24, `github.com/coder/websocket` v1.8.13, and `golang.org/x/term` v0.29.0.
+Go is the language because one static binary carries the wrapper, the relay, and the page. The page is compiled into the binary with `go:embed`, and a build with `CGO_ENABLED=0` links no C library, so a host needs only the one file. `github.com/creack/pty` provides the PTY, and the standard library provides TLS, HTTP routing, SHA-256 for session IDs, and logging. The module targets Go 1.22.2, so the dependencies are pinned to versions that still support it: `github.com/creack/pty` v1.1.24, `github.com/coder/websocket` v1.8.13, and `golang.org/x/term` v0.29.0.
 
 ### Packages
 
@@ -30,8 +30,7 @@ Go is the language because one static binary carries the wrapper, the relay, and
 | `cmd/agentwatch` | Subcommands. Turns flags, environment variables, and files into the types below. |
 | `internal/wire` | The v1 protocol: the frame-kind table, `Encode`, `Decode`, IDs, tokens, close codes, and `ClientJS`, which renders the table as `window.AW` for the browser. No I/O. |
 | `internal/record` | asciicast v2 encoding and no-clobber file naming. |
-| `internal/inbox` | The receive directory: the transfer state machine, safe file names, SHA-256 verification, and finished-transfer replay. |
-| `internal/wrapper` | The PTY session: the local terminal, the reconnecting relay link, size arbitration, and upload announcements. |
+| `internal/wrapper` | The PTY session: the local terminal, the reconnecting relay link, and size arbitration. |
 | `internal/relay` | HTTP routes, auth, the session registry, fan-out, and the replay tail. |
 | `internal/e2e` | Tests that run a real shell through a real relay with a Go viewer. |
 | `web` | `index.html`, `app.js`, `app.css`, `codec.js`, and the vendored xterm.js 5.3.0 and xterm-addon-fit 0.8.0. |
@@ -39,7 +38,7 @@ Go is the language because one static binary carries the wrapper, the relay, and
 
 ### Inside the wrapper
 
-One session loop owns the PTY size, the recorder, the inbox, and the relay link. Every event reaches it through a channel: PTY output, local keystrokes, local terminal resizes, frames from the relay, link up and link down, and the child's exit. One writer goroutine is the only writer of PTY input, so keystrokes from your terminal, keystrokes from browsers, and upload announcements never interleave inside one write.
+One session loop owns the PTY size, the recorder, and the relay link. Every event reaches it through a channel: PTY output, local keystrokes, local terminal resizes, frames from the relay, link up and link down, and the child's exit. One writer goroutine is the only writer of PTY input, so keystrokes from your terminal and keystrokes from browsers never interleave inside one write.
 
 Several parties want to set one terminal size. The PTY follows whichever side typed or resized last: your local terminal, or the browsers as a group. Among browsers, the relay picks the one that typed or resized last. When the relay link drops, the PTY returns to your local size. A browser never resizes its terminal on its own. It requests a size, and it draws at whatever size the wrapper reports.
 
@@ -49,32 +48,19 @@ When the child exits, the wrapper drains the remaining output, writes an `exit N
 
 ### Frames
 
-Every WebSocket message is one binary frame. Byte 0 is the kind, and the rest is the payload. The payload of `Output` and `Input` is raw terminal bytes. `Chunk` is a 24-byte header (`id[16]`, then `offset` as a big-endian `uint64`) followed by raw file bytes. Every other payload is UTF-8 JSON.
+Every WebSocket message is one binary frame. Byte 0 is the kind, and the rest is the payload. The payload of `Output` and `Input` is raw terminal bytes. Every other payload is UTF-8 JSON.
 
 | Kind | Byte | Sent by, to | Payload |
 | --- | --- | --- | --- |
-| `Hello` | `0x01` | wrapper to relay, first frame only, never forwarded | `{name, host, command, started, inbox, secret}` |
+| `Hello` | `0x01` | wrapper to relay, first frame only, never forwarded | `{name, host, command, started, secret}` |
 | `Output` | `0x02` | wrapper to every viewer | PTY output |
 | `SizeChanged` | `0x03` | wrapper to every viewer | `{cols, rows}`, the PTY's actual size |
 | `Exit` | `0x04` | wrapper to every viewer | `{code, signal}` |
-| `TransferStatus` | `0x05` | wrapper to every viewer | `{id, state, name, size, received, sha256, path, reason}` |
 | `Input` | `0x10` | viewer to wrapper | keystrokes, at most 64 KiB per frame |
 | `ResizeRequest` | `0x11` | viewer to wrapper | `{cols, rows}`, the size that fits the viewer's window |
-| `Offer` | `0x12` | viewer to wrapper | `{id, name, size, sha256}` |
-| `Chunk` | `0x13` | viewer to wrapper | header, then at most 256 KiB of file data |
-| `Cancel` | `0x14` | viewer to wrapper | `{id}` |
 | `Presence` | `0x20` | relay to viewer | `{wrapperOnline, viewers}` |
 
 The table in `internal/wire/wire.go` is the only list of kinds. The relay serves it to the browser as `/protocol.js`, and `web/codec.js` encodes and decodes frames from that copy. A Go test runs `codec.js` in an embedded JavaScript engine and round-trips every kind against `wire.Encode`.
-
-### Uploads
-
-1. The browser reads the whole file and computes its SHA-256 digest with WebCrypto.
-2. The browser sends `Offer` with a random 16-byte ID.
-3. The wrapper answers every `Offer`, `Chunk`, and `Cancel` with one `TransferStatus`. A `receiving` status reports the bytes received so far, and the browser keeps at most 4 chunks (1 MiB) beyond that count in flight.
-4. After the last byte, the wrapper checks the digest. On a match, it places the file in the inbox, sends a `done` status with the absolute path, and types the announce text into the PTY. On a mismatch, it deletes the partial file and sends `failed` with the reason `hash_mismatch`.
-
-An `Offer` for an ID that already finished returns the same `done` status again without writing or announcing again. If the link drops mid-transfer, the wrapper discards the partial file. When the browser is attached and the wrapper is online again, the browser sends `Cancel` and then the same `Offer`, which restarts an unfinished transfer and returns `done` for a finished one. Every viewer receives every `TransferStatus` and acts only on the IDs it sent.
 
 ### HTTP routes and authentication
 
@@ -124,8 +110,7 @@ A session ID is the first 10 bytes of the SHA-256 digest of a 32-byte secret, wr
 - **Token handling.** Tokens come from environment variables or files, never from flags, which other users can read in the process list. The relay compares tokens in constant time. A token must be at least 32 characters of `A-Z`, `a-z`, `0-9`, `-`, and `_`. Go code prints a token as `[redacted]`.
 - **The child cannot read the tokens.** The wrapper removes `AGENTWATCH_WRAPPER_TOKEN` and `AGENTWATCH_VIEWER_TOKEN` from the child's environment. Without that step, an agent could read a token and drive other sessions through the relay.
 - **Session ownership.** Taking over a session ID requires the secret behind it. The relay never shows the secret to viewers.
-- **The relay is trusted.** It sees terminal traffic and file contents in plaintext. v1 has no end-to-end encryption.
-- **Files.** Uploads land in one directory under a sanitized single path element. The wrapper writes each upload to a temporary file opened with `O_EXCL` and mode 0600 and checks the digest before the file becomes visible. It then places the file with a hard link, which never follows a symlink and never overwrites an existing file. A second `a.txt` becomes `a-1.txt`. Each file is capped by `--max-file-size`. At most 4 uploads run at once, an upload fails after 30 s without progress, and every failure deletes the partial file.
+- **The relay is trusted.** It sees terminal traffic in plaintext. v1 has no end-to-end encryption.
 - **Limits.** Every WebSocket message is at most 1 MiB. The wrapper must send `Hello` within 10 s of connecting. The relay's HTTP server waits at most 10 s for request headers.
 - **Browser.** The Content Security Policy allows scripts from the relay only, so the page runs no inline or third-party script. Inline styles are allowed because the xterm.js renderer injects them. The token travels in a header or a subprotocol, never in a cookie, so other sites cannot make requests with it. The WebSocket `Origin` must match the relay's host.
 - **Recordings.** The wrapper creates each recording with mode 0600, and any missing parent directories with mode 0700. It does not record keystrokes unless you pass `--record-input`, because keystrokes can contain passwords.
@@ -148,7 +133,7 @@ To build for another host, also set `GOOS` to `linux` or `darwin` and `GOARCH` t
 scripts/demo.sh
 ```
 
-The script prints the URL, the viewer token, and where the recordings and uploads go. Open the URL, accept the certificate warning, and paste the viewer token. Exit the shell to stop the demo. To listen on another address, set `AGENTWATCH_DEMO_ADDR`.
+The script prints the URL, the viewer token, and where the recordings go. Open the URL, accept the certificate warning, and paste the viewer token. Exit the shell to stop the demo. To listen on another address, set `AGENTWATCH_DEMO_ADDR`.
 
 ### Mint the tokens
 
@@ -181,7 +166,7 @@ To run behind a reverse proxy that terminates TLS, listen on loopback with `--pl
 ./agentwatch run --relay https://relay.example.com:8443 --name api-agent -- claude
 ```
 
-Your terminal behaves as if you ran `claude` directly. When the session starts, the wrapper prints where the recording and the uploads go. Leave out `--relay` to record a session without sharing it.
+Your terminal behaves as if you ran `claude` directly. When the session starts, the wrapper prints where the recording goes. Leave out `--relay` to record a session without sharing it.
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
@@ -192,15 +177,9 @@ Your terminal behaves as if you ran `claude` directly. When the session starts, 
 | `--record PATH` | `$XDG_STATE_HOME/agentwatch/sessions/` | Recording destination. A path that ends in `/` is a directory that gets one new file per session. |
 | `--no-record` | | Turn recording off. |
 | `--record-input` | off | Also record keystrokes as `i` events. |
-| `--inbox DIR` | `./agentwatch-inbox` | Directory for uploads. The wrapper creates it with mode 0700 on the first upload. |
-| `--no-inbox` | | Refuse uploads. |
-| `--max-file-size SIZE` | `100MiB` | Largest accepted upload. Accepts the suffixes `KiB`, `MiB`, and `GiB`. |
-| `--announce TEMPLATE` | `{path} ` | Text typed into the PTY after a verified upload. The placeholders are `{path}`, `{name}`, `{size}`, and `{sha256}`. The escapes are `\r`, `\n`, `\t`, `\\`, and `\{`. |
 | `--log PATH` | stderr when stdin is not a terminal, discarded otherwise | Diagnostics. |
 
-The default announce text types the saved path followed by a space at the agent's prompt, without pressing Enter. To have a shell run a command on each upload instead, end the template with `\r`, as in `--announce 'echo got {name}\r'`.
-
-The child sees `AGENTWATCH_SESSION` (its session ID) and, unless you pass `--no-inbox`, `AGENTWATCH_INBOX` (the absolute inbox path). The PTY is viewed in the browser, so the child always gets `TERM=xterm-256color` and `COLORTERM=truecolor`. A `NO_COLOR` value on the wrapper is passed through, and programs that honor it draw without color.
+The child sees `AGENTWATCH_SESSION` (its session ID). The PTY is viewed in the browser, so the child always gets `TERM=xterm-256color` and `COLORTERM=truecolor`. A `NO_COLOR` value on the wrapper is passed through, and programs that honor it draw without color.
 
 If stdin is not a terminal, the wrapper does not read it, and the PTY starts at 80x24 until a browser asks for another size.
 
@@ -211,9 +190,8 @@ To play a recording back, run `asciinema play FILE.cast`.
 1. Open the relay's URL, such as `https://relay.example.com:8443/`.
 2. Paste the viewer token and click **Connect**. The page keeps the token in the browser's local storage until you click **Sign out**.
 3. Click a session's name in the list. The page asks the wrapper to resize the PTY to fit your window, and what you type goes to the program.
-4. To send a file, click **Upload file** or drop the file on the terminal. The page shows progress and then the path where the file was saved.
 
-The status line in the header shows whether the agent host is online, how many viewers are attached, and the exit code once the program ends.
+The status line in the header shows whether the agent host is online, how many viewers are attached, and the exit code once the program ends. Full-screen programs such as vim redraw in the browser terminal, including the alternate screen, color, mouse reporting, and resize.
 
 ## Run the tests
 
@@ -221,7 +199,7 @@ The status line in the header shows whether the agent host is online, how many v
 GOTOOLCHAIN=local go test ./...
 ```
 
-`internal/e2e` wraps `/bin/sh` behind a relay on a local TLS server and drives it with a Go viewer. It checks resizing, echo, uploads, a bad digest, a relay restart, a wrong token, and the exit code.
+`internal/e2e` wraps `/bin/sh` behind a relay on a local TLS server and drives it with a Go viewer. It checks resizing, echo, a relay restart, a wrong token, and the exit code.
 
 ## License
 

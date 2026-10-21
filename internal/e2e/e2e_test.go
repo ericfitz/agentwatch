@@ -6,8 +6,6 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"crypto/rand"
-	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
@@ -46,7 +44,6 @@ type harness struct {
 	relay   atomic.Pointer[relay.Relay]
 	wrapTok wire.Token
 	viewTok wire.Token
-	inbox   string
 	cast    string
 	done    chan result
 	logs    lockedBuffer
@@ -68,12 +65,7 @@ func start(t *testing.T) *harness {
 	})
 
 	dir := t.TempDir()
-	h.inbox = filepath.Join(dir, "inbox")
 	h.cast = filepath.Join(dir, "session.cast")
-	announce, err := wrapper.ParseAnnounce(`echo got {name}\r`)
-	if err != nil {
-		t.Fatal(err)
-	}
 	base, err := url.Parse(h.srv.URL)
 	if err != nil {
 		t.Fatal(err)
@@ -92,15 +84,12 @@ func start(t *testing.T) *harness {
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
 		code, err := wrapper.Run(ctx, wrapper.Config{
-			Command:      []string{"/bin/sh"},
-			Name:         "e2e",
-			Relay:        &wrapper.Relay{URL: base, Token: h.wrapTok, TLS: &tls.Config{RootCAs: roots}},
-			Record:       h.cast,
-			Inbox:        h.inbox,
-			MaxFileBytes: 4 << 20,
-			Announce:     announce,
-			Stdin:        stdin,
-			Log:          slog.New(slog.NewTextHandler(&h.logs, nil)),
+			Command: []string{"/bin/sh"},
+			Name:    "e2e",
+			Relay:   &wrapper.Relay{URL: base, Token: h.wrapTok, TLS: &tls.Config{RootCAs: roots}},
+			Record:  h.cast,
+			Stdin:   stdin,
+			Log:     slog.New(slog.NewTextHandler(&h.logs, nil)),
 		})
 		h.done <- result{code, err}
 	}()
@@ -173,19 +162,6 @@ func (h *harness) wait() result {
 		h.t.Fatal("wrapper.Run did not return")
 		return result{}
 	}
-}
-
-func (h *harness) inboxNames() []string {
-	h.t.Helper()
-	entries, err := os.ReadDir(h.inbox)
-	if err != nil {
-		h.t.Fatal(err)
-	}
-	var names []string
-	for _, e := range entries {
-		names = append(names, e.Name())
-	}
-	return names
 }
 
 // viewer is a Go stand-in for app.js. It keeps every byte of output it has
@@ -290,47 +266,6 @@ func (v *viewer) expectClose(code wire.CloseCode) {
 	}
 }
 
-func (v *viewer) status(id wire.TransferID) wire.TransferStatus {
-	v.t.Helper()
-	return expect(v, func(st wire.TransferStatus) bool { return st.ID == id })
-}
-
-// pump sends chunks the way app.js does: never more than UploadWindow chunks
-// beyond the last acknowledged byte. It returns the first status that is not
-// receiving.
-func (v *viewer) pump(id wire.TransferID, data []byte, sent int) wire.TransferStatus {
-	v.t.Helper()
-	for {
-		st := v.status(id)
-		if st.State != wire.TransferReceiving {
-			return st
-		}
-		for sent < len(data) && int64(sent)-st.Received < wire.MaxChunk*wire.UploadWindow {
-			n := min(wire.MaxChunk, len(data)-sent)
-			v.send(wire.Chunk{ID: id, Offset: int64(sent), Data: data[sent : sent+n]})
-			sent += n
-		}
-	}
-}
-
-func (v *viewer) upload(id wire.TransferID, name string, data []byte, digest wire.Digest) wire.TransferStatus {
-	v.t.Helper()
-	v.send(wire.Offer{ID: id, Name: name, Size: int64(len(data)), SHA256: digest})
-	return v.pump(id, data, 0)
-}
-
-func newID() wire.TransferID {
-	var id wire.TransferID
-	rand.Read(id[:])
-	return id
-}
-
-func randomBytes(n int) []byte {
-	b := make([]byte, n)
-	rand.Read(b)
-	return b
-}
-
 func TestShellInPTYThroughRelay(t *testing.T) {
 	h := start(t)
 	id := h.session()
@@ -348,39 +283,6 @@ func TestShellInPTYThroughRelay(t *testing.T) {
 
 	v.run("echo env:${AGENTWATCH_WRAPPER_TOKEN:-unset}:${AGENTWATCH_VIEWER_TOKEN:-unset}:$AGENTWATCH_SESSION")
 	v.expectOutput("\nenv:unset:unset:" + string(id))
-
-	v.expectOutput(prompt)
-	data := randomBytes(wire.MaxChunk*5 + 1234)
-	good := newID()
-	st := v.upload(good, "hello.txt", data, sha256.Sum256(data))
-	if st.State != wire.TransferDone || st.Name != "hello.txt" || st.Path != filepath.Join(h.inbox, "hello.txt") {
-		t.Fatalf("upload ended with %+v", st)
-	}
-	saved, err := os.ReadFile(st.Path)
-	if err != nil || !bytes.Equal(saved, data) {
-		t.Fatalf("saved file differs from the upload (err %v, %d bytes, want %d)", err, len(saved), len(data))
-	}
-	v.expectOutput("\ngot hello.txt")
-
-	replay := wire.Offer{ID: good, Name: "hello.txt", Size: int64(len(data)), SHA256: sha256.Sum256(data)}
-	v.send(replay)
-	if again := v.status(good); again.State != wire.TransferDone || again.Path != st.Path {
-		t.Fatalf("replayed offer got %+v, want the stored done status", again)
-	}
-
-	bad := newID()
-	if st := v.upload(bad, "bad.txt", []byte("corrupted"), sha256.Sum256([]byte("original"))); st.State != wire.TransferFailed || st.Reason != wire.FailMismatch {
-		t.Fatalf("bad digest ended with %+v, want hash_mismatch", st)
-	}
-	if names := h.inboxNames(); len(names) != 1 || names[0] != "hello.txt" {
-		t.Fatalf("inbox holds %q, want only hello.txt", names)
-	}
-
-	v.run("echo after''-uploads")
-	v.expectOutput("\nafter-uploads")
-	if n := strings.Count(v.out.String(), "\ngot hello.txt"); n != 1 {
-		t.Fatalf("the announcement ran %d times, want once", n)
-	}
 
 	v.run("exit 3")
 	if x := expect(v, func(wire.Exit) bool { return true }); x.Code != 3 {
@@ -400,32 +302,18 @@ func TestShellInPTYThroughRelay(t *testing.T) {
 	if codes["i"] {
 		t.Error("recording has input events without RecordInput")
 	}
-	if !strings.Contains(output, "\n30 100") || !strings.Contains(output, "\ngot hello.txt") {
+	if !strings.Contains(output, "\n30 100") || !strings.Contains(output, "\ntyped-by-viewer") {
 		t.Errorf("recorded output lacks the session's output:\n%s", output)
 	}
 }
 
-func TestRelayRestartAbortsInFlightUploadsAndKeepsFinishedOnes(t *testing.T) {
+func TestRelayRestartKeepsTheSession(t *testing.T) {
 	h := start(t)
 	id := h.session()
 	v := h.attach(id)
 
-	v.expectOutput(prompt)
-	data := randomBytes(wire.MaxChunk + 100)
-	finished := newID()
-	if st := v.upload(finished, "first.bin", data, sha256.Sum256(data)); st.State != wire.TransferDone {
-		t.Fatalf("first upload ended with %+v", st)
-	}
-	v.expectOutput("\ngot first.bin")
-
-	inflight := newID()
-	offer := wire.Offer{ID: inflight, Name: "second.bin", Size: int64(len(data)), SHA256: sha256.Sum256(data)}
-	v.send(offer)
-	v.status(inflight)
-	v.send(wire.Chunk{ID: inflight, Offset: 0, Data: data[:wire.MaxChunk]})
-	if st := v.status(inflight); st.State != wire.TransferReceiving || st.Received != wire.MaxChunk {
-		t.Fatalf("partial upload got %+v", st)
-	}
+	v.run("echo before''-restart")
+	v.expectOutput("\nbefore-restart")
 
 	h.restartRelay()
 	v.expectClose(wire.CloseCode(websocket.StatusGoingAway))
@@ -433,26 +321,9 @@ func TestRelayRestartAbortsInFlightUploadsAndKeepsFinishedOnes(t *testing.T) {
 		t.Fatalf("after the relay restart the session is %s, want %s", again, id)
 	}
 	v = h.attach(id)
-
-	// Without the abort, the inbox would refuse a second Offer of an active id.
-	v.send(offer)
-	if st := v.pump(inflight, data, 0); st.State != wire.TransferDone || st.Path != filepath.Join(h.inbox, "second.bin") {
-		t.Fatalf("restarted upload ended with %+v", st)
-	}
-	v.expectOutput("\ngot second.bin")
-
-	v.send(wire.Offer{ID: finished, Name: "first.bin", Size: int64(len(data)), SHA256: sha256.Sum256(data)})
-	if st := v.status(finished); st.State != wire.TransferDone || st.Path != filepath.Join(h.inbox, "first.bin") {
-		t.Fatalf("a finished upload offered after the restart got %+v", st)
-	}
-	v.run("echo after''-restart")
+	// The new relay has an empty replay, and the shell is already at its prompt.
+	v.send(wire.Input("echo after''-restart\r"))
 	v.expectOutput("\nafter-restart")
-	if n := strings.Count(v.out.String(), "\ngot first.bin"); n != 0 {
-		t.Fatalf("the replayed offer announced first.bin %d more times", n)
-	}
-	if names := h.inboxNames(); strings.Join(names, ",") != "first.bin,second.bin" {
-		t.Fatalf("inbox holds %q", names)
-	}
 
 	v.run("exit 0")
 	v.expectClose(wire.CloseEnded)

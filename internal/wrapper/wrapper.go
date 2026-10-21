@@ -1,5 +1,5 @@
 // Package wrapper runs a command in a PTY, records it, and links it to a relay
-// so browsers can watch it, type into it, resize it, and send it files.
+// so browsers can watch it, type into it, and resize it.
 package wrapper
 
 import (
@@ -18,23 +18,19 @@ import (
 
 	"github.com/creack/pty"
 
-	"github.com/ericfitz/agentwatch/internal/inbox"
 	"github.com/ericfitz/agentwatch/internal/record"
 	"github.com/ericfitz/agentwatch/internal/wire"
 )
 
 type Config struct {
-	Command      []string     // argv; Command[0] is resolved with exec.LookPath
-	Name         string       // session list name
-	Relay        *Relay       // nil: no remoting
-	Record       string       // record.Open target; "" disables
-	RecordInput  bool         // also write "i" events
-	Inbox        string       // absolute receive dir; "" refuses uploads
-	MaxFileBytes int64        // > 0 when Inbox is set
-	Announce     Announce     // typed into the PTY after each verified file
-	Stdin        *os.File     // local terminal; nil or not a TTY means headless
-	Stdout       io.Writer    // local copy of PTY output; nil discards
-	Log          *slog.Logger // nil discards
+	Command     []string     // argv; Command[0] is resolved with exec.LookPath
+	Name        string       // session list name
+	Relay       *Relay       // nil: no remoting
+	Record      string       // record.Open target; "" disables
+	RecordInput bool         // also write "i" events
+	Stdin       *os.File     // local terminal; nil or not a TTY means headless
+	Stdout      io.Writer    // local copy of PTY output; nil discards
+	Log         *slog.Logger // nil discards
 }
 
 type Relay struct {
@@ -44,7 +40,6 @@ type Relay struct {
 }
 
 const (
-	expireEvery  = 5 * time.Second
 	drainWait    = time.Second // a background grandchild can hold the PTY open forever
 	hangupWait   = 5 * time.Second
 	shutdownWait = 2 * time.Second
@@ -61,7 +56,6 @@ type session struct {
 	ptmx   *os.File
 	pty    *ptyWriter // the only writer to PTY input
 	rec    *record.Recorder
-	inbox  *inbox.Inbox
 	up     *uplink    // nil without a relay
 	local  *localTerm // nil when headless
 	size   sizeArbiter
@@ -99,10 +93,6 @@ func Run(ctx context.Context, cfg Config) (exitCode int, err error) {
 	if err != nil {
 		return 2, err
 	}
-	in, err := inbox.Open(inbox.Config{Dir: cfg.Inbox, MaxBytes: cfg.MaxFileBytes})
-	if err != nil {
-		return 2, err
-	}
 	secret := wire.NewSessionSecret()
 	started := time.Now()
 	host, _ := os.Hostname()
@@ -112,7 +102,6 @@ func Run(ctx context.Context, cfg Config) (exitCode int, err error) {
 		Host:    host,
 		Command: cfg.Command[:min(len(cfg.Command), maxHelloArgs)],
 		Started: started,
-		Inbox:   in.Info(),
 	}
 	// The relay applies the same check, so a bad name fails here instead of
 	// as a close code after the agent has started.
@@ -139,7 +128,6 @@ func Run(ctx context.Context, cfg Config) (exitCode int, err error) {
 		cfg:        cfg,
 		log:        log,
 		stdout:     stdout,
-		inbox:      in,
 		up:         up,
 		local:      local,
 		size:       newSizeArbiter(local.size()),
@@ -164,7 +152,7 @@ func Run(ctx context.Context, cfg Config) (exitCode int, err error) {
 	}
 	s.rec = rec
 
-	s.cmd = &exec.Cmd{Path: path, Args: cfg.Command, Env: childEnv(os.Environ(), secret.ID(), cfg.Inbox)}
+	s.cmd = &exec.Cmd{Path: path, Args: cfg.Command, Env: childEnv(os.Environ(), secret.ID())}
 	if s.ptmx, err = pty.StartWithSize(s.cmd, winsize(initial)); err != nil {
 		rec.Close()
 		os.Remove(recPath)
@@ -173,9 +161,6 @@ func Run(ctx context.Context, cfg Config) (exitCode int, err error) {
 	}
 	if recPath != "" {
 		fmt.Fprintf(stdout, "agentwatch: recording to %s\r\n", recPath)
-	}
-	if cfg.Inbox != "" {
-		fmt.Fprintf(stdout, "agentwatch: uploads go to %s\r\n", cfg.Inbox)
 	}
 
 	s.pty = startPTYWriter(s.ptmx)
@@ -192,8 +177,6 @@ func Run(ctx context.Context, cfg Config) (exitCode int, err error) {
 }
 
 func (s *session) loop(ctx context.Context) (int, error) {
-	expire := time.NewTicker(expireEvery)
-	defer expire.Stop()
 	done := ctx.Done()
 	var drain, kill <-chan time.Time
 	for {
@@ -221,10 +204,6 @@ func (s *session) loop(ctx context.Context) (int, error) {
 			s.applySize(s.size.observe(sourceLocal, &sz))
 		case ev := <-s.up.eventsC():
 			s.link(ev)
-		case now := <-expire.C:
-			for _, st := range s.inbox.Expire(now) {
-				s.up.send(st)
-			}
 		case x := <-s.exited:
 			s.exit = &x
 			if s.drained {
@@ -250,8 +229,6 @@ func (s *session) link(ev linkEvent) {
 		s.up.send(wire.SizeChanged{TermSize: s.size.applied})
 		s.rec.Marker(now, "relay connected")
 	case linkDown:
-		// The statuses have nowhere to go; a sender restarts by offering again.
-		s.inbox.AbortAll(wire.FailCancelled)
 		s.applySize(s.size.remoteLost())
 		s.rec.Marker(now, "relay disconnected")
 	case linkFrame:
@@ -266,14 +243,6 @@ func (s *session) handle(m wire.Message) {
 		s.input(m)
 	case wire.ResizeRequest:
 		s.applySize(s.size.observe(sourceRemote, &m.TermSize))
-	case wire.TransferMessage:
-		now := time.Now()
-		st, saved := s.inbox.Handle(m, now)
-		s.up.send(st)
-		if saved != nil {
-			s.pty.enqueue(s.cfg.Announce.Render(*saved))
-			s.rec.Marker(now, "received "+saved.Path+" sha256="+saved.SHA256.String())
-		}
 	default:
 		s.log.Warn("wrapper: relay sent a frame only viewers receive", "type", fmt.Sprintf("%T", m))
 	}
@@ -305,16 +274,13 @@ func (s *session) signal(sig syscall.Signal) {
 	}
 }
 
-// finish runs once the child has exited. Output frames, the final transfer
-// statuses, and Exit share one queue, so Exit is the last frame the relay sees.
+// finish runs once the child has exited. Output frames and Exit share one
+// queue, so Exit is the last frame the relay sees.
 func (s *session) finish() (int, error) {
 	close(s.quit)
 	s.pty.close()
 	s.ptmx.Close()
 	now := time.Now()
-	for _, st := range s.inbox.AbortAll(wire.FailCancelled) {
-		s.up.send(st)
-	}
 	s.rec.Marker(now, fmt.Sprintf("exit %d", s.exit.Code))
 	recErr := s.rec.Close()
 	s.up.send(*s.exit)

@@ -60,7 +60,7 @@ func (rl *Relay) bind(hello wire.Hello, p *peer) (h *hub, old *peer) {
 		h = &hub{viewers: map[*peer]struct{}{}}
 		rl.sessions[id] = h
 	}
-	h.info = wire.SessionInfo{ID: id, Name: hello.Name, Host: hello.Host, Command: hello.Command, Started: hello.Started, Inbox: hello.Inbox}
+	h.info = wire.SessionInfo{ID: id, Name: hello.Name, Host: hello.Host, Command: hello.Command, Started: hello.Started}
 	// A new link starts at the wrapper's local size, so the next typist must
 	// resend its own.
 	old, h.wrapper, h.active = h.wrapper, p, nil

@@ -85,7 +85,6 @@ func hello(secret wire.SessionSecret, name string) wire.Hello {
 		Host:    "build-01",
 		Command: []string{"claude"},
 		Started: time.Date(2026, 10, 21, 5, 3, 0, 0, time.UTC),
-		Inbox:   wire.InboxInfo{Enabled: true, MaxBytes: 1 << 20},
 	}
 }
 

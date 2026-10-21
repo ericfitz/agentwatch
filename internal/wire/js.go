@@ -10,24 +10,14 @@ func ClientJS() []byte {
 		Kind         map[string]Kind        `json:"kind"`
 		Payload      map[string]payloadForm `json:"payload"`
 		Close        map[string]CloseCode   `json:"close"`
-		MaxChunk     int                    `json:"maxChunk"`
 		MaxInput     int                    `json:"maxInput"`
-		UploadWindow int                    `json:"uploadWindow"`
-		ChunkHeader  int                    `json:"chunkHeader"`
-		ChunkIDBytes int                    `json:"chunkIdBytes"`
-		FailText     map[FailReason]string  `json:"failText"`
 	}{
 		Subprotocol:  Subprotocol,
 		BearerPrefix: BearerPrefix,
 		Kind:         map[string]Kind{},
 		Payload:      map[string]payloadForm{},
 		Close:        closeNames,
-		MaxChunk:     MaxChunk,
 		MaxInput:     MaxInput,
-		UploadWindow: UploadWindow,
-		ChunkHeader:  chunkHeader,
-		ChunkIDBytes: chunkIDBytes,
-		FailText:     failText,
 	}
 	for k, spec := range kinds {
 		aw.Kind[spec.name] = k

@@ -2,11 +2,9 @@
 package wire
 
 import (
-	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"math"
 	"net"
 	"strings"
 	"time"
@@ -18,33 +16,24 @@ const (
 	BearerPrefix = "agentwatch.bearer."
 	WrapperPath  = "/api/wrapper"
 
-	MaxMessage   = 1 << 20
-	MaxChunk     = 256 << 10
-	MaxInput     = 64 << 10
-	UploadWindow = 4
+	MaxMessage = 1 << 20
+	MaxInput   = 64 << 10
 
-	chunkIDBytes   = len(TransferID{})
-	chunkHeader    = chunkIDBytes + 8
-	maxTermSide    = 1000
-	maxHelloName   = 128
-	maxHelloArgs   = 64
-	maxOfferedName = 255
+	maxTermSide  = 1000
+	maxHelloName = 128
+	maxHelloArgs = 64
 )
 
 type Kind byte
 
 const (
-	KindHello          Kind = 0x01
-	KindOutput         Kind = 0x02
-	KindSizeChanged    Kind = 0x03
-	KindExit           Kind = 0x04
-	KindTransferStatus Kind = 0x05
-	KindInput          Kind = 0x10
-	KindResizeRequest  Kind = 0x11
-	KindOffer          Kind = 0x12
-	KindChunk          Kind = 0x13
-	KindCancel         Kind = 0x14
-	KindPresence       Kind = 0x20
+	KindHello         Kind = 0x01
+	KindOutput        Kind = 0x02
+	KindSizeChanged   Kind = 0x03
+	KindExit          Kind = 0x04
+	KindInput         Kind = 0x10
+	KindResizeRequest Kind = 0x11
+	KindPresence      Kind = 0x20
 )
 
 // Route says who may send a kind and where the relay sends it next.
@@ -62,9 +51,8 @@ const (
 type payloadForm string
 
 const (
-	payloadJSON  payloadForm = "json"
-	payloadRaw   payloadForm = "raw"
-	payloadChunk payloadForm = "chunk"
+	payloadJSON payloadForm = "json"
+	payloadRaw  payloadForm = "raw"
 )
 
 type kindSpec struct {
@@ -78,17 +66,13 @@ type kindSpec struct {
 // kinds is the only list of frame kinds. Encode, Decode, PeekKind, and
 // ClientJS read it. A kind that is not here does not exist on the wire.
 var kinds = map[Kind]kindSpec{
-	KindHello:          jsonKind("Hello", RouteHello, Hello.validate),
-	KindOutput:         rawKind[Output]("Output", RouteUp, nil),
-	KindSizeChanged:    jsonKind("SizeChanged", RouteUp, SizeChanged.validate),
-	KindExit:           jsonKind[Exit]("Exit", RouteUp, nil),
-	KindTransferStatus: jsonKind[TransferStatus]("TransferStatus", RouteUp, nil),
-	KindInput:          rawKind("Input", RouteDown, Input.validate),
-	KindResizeRequest:  jsonKind("ResizeRequest", RouteDown, ResizeRequest.validate),
-	KindOffer:          jsonKind("Offer", RouteDown, Offer.validate),
-	KindChunk:          {name: "Chunk", route: RouteDown, payload: payloadChunk, encode: encodeChunk, decode: decodeChunk},
-	KindCancel:         jsonKind[Cancel]("Cancel", RouteDown, nil),
-	KindPresence:       jsonKind[Presence]("Presence", RouteRelay, nil),
+	KindHello:         jsonKind("Hello", RouteHello, Hello.validate),
+	KindOutput:        rawKind[Output]("Output", RouteUp, nil),
+	KindSizeChanged:   jsonKind("SizeChanged", RouteUp, SizeChanged.validate),
+	KindExit:          jsonKind[Exit]("Exit", RouteUp, nil),
+	KindInput:         rawKind("Input", RouteDown, Input.validate),
+	KindResizeRequest: jsonKind("ResizeRequest", RouteDown, ResizeRequest.validate),
+	KindPresence:      jsonKind[Presence]("Presence", RouteRelay, nil),
 }
 
 func jsonKind[T Message](name string, route Route, check func(T) error) kindSpec {
@@ -138,24 +122,12 @@ func checked[T Message](m T, check func(T) error) (Message, error) {
 // Message is one decoded frame. Only this package implements it.
 type Message interface{ kind() Kind }
 
-// TransferMessage is the part of the protocol the inbox consumes.
-type TransferMessage interface {
-	Message
-	transfer()
-}
-
 type Hello struct {
 	Secret  SessionSecret `json:"secret"`
 	Name    string        `json:"name"` // 1..128 bytes, valid UTF-8, no control characters
 	Host    string        `json:"host"`
 	Command []string      `json:"command"` // at most 64 elements
 	Started time.Time     `json:"started"`
-	Inbox   InboxInfo     `json:"inbox"`
-}
-
-type InboxInfo struct {
-	Enabled  bool  `json:"enabled"`
-	MaxBytes int64 `json:"maxBytes"`
 }
 
 type Output []byte
@@ -180,38 +152,13 @@ type Presence struct {
 	Viewers       int  `json:"viewers"`
 }
 
-type Offer struct {
-	ID     TransferID `json:"id"`
-	Name   string     `json:"name"` // as the browser saw it, at most 255 bytes; the inbox sanitizes
-	Size   int64      `json:"size"` // >= 0
-	SHA256 Digest     `json:"sha256"`
-}
-
-type Chunk struct {
-	ID     TransferID
-	Offset int64
-	Data   []byte // 1..MaxChunk bytes
-}
-
-type Cancel struct {
-	ID TransferID `json:"id"`
-}
-
-func (Hello) kind() Kind          { return KindHello }
-func (Output) kind() Kind         { return KindOutput }
-func (SizeChanged) kind() Kind    { return KindSizeChanged }
-func (Exit) kind() Kind           { return KindExit }
-func (TransferStatus) kind() Kind { return KindTransferStatus }
-func (Input) kind() Kind          { return KindInput }
-func (ResizeRequest) kind() Kind  { return KindResizeRequest }
-func (Offer) kind() Kind          { return KindOffer }
-func (Chunk) kind() Kind          { return KindChunk }
-func (Cancel) kind() Kind         { return KindCancel }
-func (Presence) kind() Kind       { return KindPresence }
-
-func (Offer) transfer()  {}
-func (Chunk) transfer()  {}
-func (Cancel) transfer() {}
+func (Hello) kind() Kind         { return KindHello }
+func (Output) kind() Kind        { return KindOutput }
+func (SizeChanged) kind() Kind   { return KindSizeChanged }
+func (Exit) kind() Kind          { return KindExit }
+func (Input) kind() Kind         { return KindInput }
+func (ResizeRequest) kind() Kind { return KindResizeRequest }
+func (Presence) kind() Kind      { return KindPresence }
 
 func (h Hello) validate() error {
 	if len(h.Name) < 1 || len(h.Name) > maxHelloName || strings.IndexFunc(h.Name, unicode.IsControl) >= 0 {
@@ -237,89 +184,6 @@ func (in Input) validate() error {
 	return nil
 }
 
-func (o Offer) validate() error {
-	if len(o.Name) > maxOfferedName {
-		return fmt.Errorf("file name is %d bytes, limit %d", len(o.Name), maxOfferedName)
-	}
-	if o.Size < 0 {
-		return fmt.Errorf("negative size %d", o.Size)
-	}
-	return nil
-}
-
-func encodeChunk(m Message) []byte {
-	c := m.(Chunk)
-	b := make([]byte, 0, chunkHeader+len(c.Data))
-	b = append(b, c.ID[:]...)
-	b = binary.BigEndian.AppendUint64(b, uint64(c.Offset))
-	return append(b, c.Data...)
-}
-
-func decodeChunk(p []byte) (Message, error) {
-	if len(p) < chunkHeader {
-		return nil, fmt.Errorf("chunk header is %d bytes, want %d", len(p), chunkHeader)
-	}
-	var c Chunk
-	n := copy(c.ID[:], p)
-	off := binary.BigEndian.Uint64(p[n:])
-	if off > math.MaxInt64 {
-		return nil, fmt.Errorf("chunk offset %d out of range", off)
-	}
-	c.Offset = int64(off)
-	c.Data = p[chunkHeader:]
-	if len(c.Data) < 1 || len(c.Data) > MaxChunk {
-		return nil, fmt.Errorf("chunk data is %d bytes, want 1..%d", len(c.Data), MaxChunk)
-	}
-	return c, nil
-}
-
-type TransferState string
-
-const (
-	TransferReceiving TransferState = "receiving"
-	TransferDone      TransferState = "done"
-	TransferFailed    TransferState = "failed"
-)
-
-type FailReason string
-
-const (
-	FailDisabled  FailReason = "disabled"
-	FailTooLarge  FailReason = "too_large"
-	FailBusy      FailReason = "busy"
-	FailProtocol  FailReason = "protocol" // unknown or duplicate id, wrong offset, overrun
-	FailMismatch  FailReason = "hash_mismatch"
-	FailCancelled FailReason = "cancelled"
-	FailTimeout   FailReason = "timeout"
-	FailIO        FailReason = "io_error"
-)
-
-// failText is the human text for each FailReason. ClientJS exports it, so the
-// browser and the wrapper's log say the same thing.
-var failText = map[FailReason]string{
-	FailDisabled:  "This host does not accept uploads",
-	FailTooLarge:  "File is larger than this host accepts",
-	FailBusy:      "This host is receiving too many files; try again shortly",
-	FailProtocol:  "Upload protocol error",
-	FailMismatch:  "File arrived corrupted (SHA-256 mismatch)",
-	FailCancelled: "Upload cancelled",
-	FailTimeout:   "Upload stalled and timed out",
-	FailIO:        "The host could not save the file",
-}
-
-// TransferStatus is the wrapper's only reply to Offer, Chunk, and Cancel. A
-// receiving status is also the sender's flow-control credit.
-type TransferStatus struct {
-	ID       TransferID    `json:"id"`
-	State    TransferState `json:"state"`
-	Name     string        `json:"name,omitempty"` // sanitized name
-	Size     int64         `json:"size"`
-	Received int64         `json:"received"`
-	SHA256   *Digest       `json:"sha256,omitempty"`
-	Path     string        `json:"path,omitempty"`   // done only, the absolute path on the wrapper host
-	Reason   FailReason    `json:"reason,omitempty"` // failed only
-}
-
 // SessionInfo is one row of GET /api/sessions. The relay builds it from Hello
 // and never stores the secret.
 type SessionInfo struct {
@@ -330,7 +194,6 @@ type SessionInfo struct {
 	Started time.Time `json:"started"`
 	Online  bool      `json:"online"`
 	Viewers int       `json:"viewers"`
-	Inbox   InboxInfo `json:"inbox"`
 }
 
 type CloseCode uint16
@@ -360,8 +223,8 @@ func Encode(m Message) []byte {
 	return append([]byte{byte(k)}, kinds[k].encode(m)...)
 }
 
-// Decode parses and validates one frame. Output, Input, and Chunk.Data alias
-// msg, so the caller must not reuse msg while the message is in use.
+// Decode parses and validates one frame. Output and Input alias msg, so the
+// caller must not reuse msg while the message is in use.
 func Decode(msg []byte) (Message, error) {
 	_, spec, err := lookup(msg)
 	if err != nil {

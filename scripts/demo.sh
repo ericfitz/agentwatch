@@ -38,7 +38,6 @@ cat <<EOF
 Open:          https://$addr/
 Viewer token:  $AGENTWATCH_VIEWER_TOKEN
 Recordings:    $work/sessions/
-Uploads:       $work/inbox/
 Relay log:     $work/relay.log
 
 Starting bash under agentwatch. Exit the shell to stop the demo.
@@ -46,4 +45,4 @@ Starting bash under agentwatch. Exit the shell to stop the demo.
 EOF
 
 "$work/agentwatch" run --relay "https://$addr" --ca-file "$work/cert.pem" --name demo \
-	--record "$work/sessions/" --inbox "$work/inbox" -- bash --noprofile --norc
+	--record "$work/sessions/" -- bash --noprofile --norc

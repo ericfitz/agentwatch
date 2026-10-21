@@ -15,7 +15,7 @@ func TestChildEnvAdvertisesTheBrowserTerminal(t *testing.T) {
 		"SHELL=/bin/bash",
 		"FOO=bar",
 		"AGENTWATCH_WRAPPER_TOKEN=secret",
-	}, wire.SessionID("abcdefghijklmnop"), "/tmp/inbox")
+	}, wire.SessionID("abcdefghijklmnop"))
 	got := map[string]string{}
 	for _, kv := range env {
 		k, v, _ := strings.Cut(kv, "=")
@@ -33,7 +33,7 @@ func TestChildEnvAdvertisesTheBrowserTerminal(t *testing.T) {
 	if _, ok := got["AGENTWATCH_WRAPPER_TOKEN"]; ok {
 		t.Fatal("wrapper token leaked into the child")
 	}
-	if got["AGENTWATCH_SESSION"] != "abcdefghijklmnop" || got["AGENTWATCH_INBOX"] != "/tmp/inbox" {
+	if got["AGENTWATCH_SESSION"] != "abcdefghijklmnop" {
 		t.Fatalf("session env = %#v", got)
 	}
 }
