@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>agentwatch</title>
+<link rel="stylesheet" href="/static/xterm.min.css">
+<link rel="stylesheet" href="/app.css">
+<script src="/protocol.js" defer></script>
+<script src="/codec.js" defer></script>
+<script src="/static/xterm.min.js" defer></script>
+<script src="/static/xterm-addon-fit.min.js" defer></script>
+<script src="/app.js" defer></script>
+</head>
+<body>
+<header class="bar">
+  <a class="brand" href="#/">agentwatch</a>
+  <span id="title" class="title"></span>
+  <span id="status" class="status" hidden></span>
+  <span class="spacer"></span>
+  <button id="signout" type="button" class="quiet" hidden>Sign out</button>
+</header>
+
+<main>
+  <form id="login" class="panel" hidden>
+    <h1>Connect to this relay</h1>
+    <p>Paste the viewer token. Anyone holding it can type into every session on this relay, so treat it like a shell password.</p>
+    <label for="token">Viewer token</label>
+    <input id="token" type="password" autocomplete="off" spellcheck="false" required>
+    <button type="submit">Connect</button>
+    <p id="login-error" class="error" role="alert"></p>
+  </form>
+
+  <section id="list" class="panel wide" hidden>
+    <h1>Sessions</h1>
+    <table>
+      <thead><tr><th>Name</th><th>Host</th><th>Command</th><th>Started</th><th>State</th><th>Viewers</th></tr></thead>
+      <tbody id="rows"></tbody>
+    </table>
+    <p id="empty" class="muted" hidden>No sessions yet. Start one with <code>agentwatch run --relay URL -- COMMAND</code>.</p>
+  </section>
+
+  <section id="session" hidden>
+    <div id="terminal"></div>
+  </section>
+</main>
+
+<div id="toasts" aria-live="polite"></div>
+</body>
+</html>
